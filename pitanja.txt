@@ -1,0 +1,9 @@
+1.Treba li kod _redeemCollateral() da proveravam da li je kolicina koju zeli veca od onoga sto ima, i da automatski mu dodeljujem najvecu mogucu koliko je na raspolaganju?
+    Takodje, da li tu treba proveravati HealthFactor ili ga samo proveravati pozivamo ovu funkciju u external funkcijama
+
+2. Da li pre pisati, ako imamo neki ERC20 kontrakt koji vodimo kao varijablu u drugom kontrktu:
+    IERC20(address(tajKontrakt)).safeTransfer....
+    ili
+    tajKontrakt.safeTransfer...
+
+3. Imam pitanje zakomentarisano u _repay funckviji 
