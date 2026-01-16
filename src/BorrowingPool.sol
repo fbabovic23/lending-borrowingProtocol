@@ -1,12 +1,13 @@
 //SPDX-License-Identifier: MIT
 
 // Layout of Contract:
-// version
+// SPDX license
+// pragma (version)
 // imports
 // interfaces, libraries, contracts
-// errors
 // Type declarations
-// State variables
+// State variables(constant, immutable,..)
+// Errors
 // Events
 // Modifiers
 // Functions
@@ -24,37 +25,13 @@
 pragma solidity ^0.8.24;
 
 import {LendingVault} from "./LendingVault.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract BorrowingPool {
     using SafeERC20 for IERC20;
-
-    error BorrowingPool__NotAllowedTokenAsCollateral();
-    error BorrowingPool__AmountIsZero();
-    error BorrowingPool__HealthFactorIsBroken();
-    error BorrowingPool__HealthFactorIsOk();
-    error BorrowingPool__TokenAddressesAndPriceFeedsMustBeSameLength();
-
-    LendingVault private immutable i_lv;
-
-    uint256 private totalBorrows;
-    uint256 private totalSupply;
-
-    //To calculate users debt we are using formula
-    // x*R(n-1)/R(k-1)
-    uint256 private cumulativeRates = 1e18;
-    //To see how much of debt user has, we need to call function calculateDebt(), not just use mapping debt
-    mapping(address user => uint256) private debt;
-
-    mapping(address user => mapping(address token => uint256 amount)) private userCollateralDeposited;
-    mapping(address token => address priceFeed) private priceFeeds;
-    address[] private collateralTokens;
-
-    uint256 private lastUpdateTimestamp;
 
     uint256 constant LOAN_TO_VALUE = 70;
     uint256 constant LIQUIDATION_TRESHOLD = 80;
@@ -69,6 +46,29 @@ contract BorrowingPool {
 
     uint256 constant YEAR_SEC = 365 * 24 * 60 * 60 * 1e18;
     uint256 constant PRECISION = 1e18;
+
+    LendingVault private immutable i_lv;
+
+    uint256 private totalAssets;
+    uint256 private totalDebt;
+
+    //To calculate users debt we are using formula
+    // x*R(n-1)/R(k-1)
+    uint256 private cumulativeRates = 1e18;
+    //To see how much of debt user has, we need to call function calculateDebt(), not just use mapping debt
+    mapping(address user => uint256) private debt;
+
+    mapping(address user => mapping(address token => uint256 amount)) private userCollateralDeposited;
+    mapping(address token => address priceFeed) private priceFeeds;
+    address[] private collateralTokens;
+
+    uint256 private lastUpdateTimestamp;
+
+    error BorrowingPool__NotAllowedTokenAsCollateral();
+    error BorrowingPool__AmountIsZero();
+    error BorrowingPool__HealthFactorIsBroken();
+    error BorrowingPool__HealthFactorIsOk();
+    error BorrowingPool__TokenAddressesAndPriceFeedsMustBeSameLength();
 
     event CollateralDeposited(address user, address collateralToken, uint256 amount);
     event CollateralRedeemed(address from, address to, address collateralToken, uint256 amountCollateral);
@@ -135,7 +135,11 @@ contract BorrowingPool {
     function borrow(uint256 amount) public moreThenZero(amount) {
         _updateCumulativeRates();
 
-        debt[msg.sender] += Math.mulDiv(amount, 1e18, cumulativeRates);
+        uint256 debtAmount = Math.mulDiv(amount, 1e18, cumulativeRates);
+
+        debt[msg.sender] += debtAmount;
+
+        totalDebt += debtAmount;
 
         //Da li ovom mestu ili na samom kraju revert da ostavim?
         _revertIfHealthFactorIsBroken(msg.sender);
@@ -175,6 +179,10 @@ contract BorrowingPool {
         return _calculateDebt(user);
     }
 
+    function calculateTotalDebt() external returns (uint256) {
+        return _calculateTotalDebt();
+    }
+
     function currentBorrowRate() external returns (uint256 borrowRate) {
         return _currentBorrowRate();
     }
@@ -202,7 +210,12 @@ contract BorrowingPool {
             //Je l ima smisla ovo da se uradi?
             amount = amountToRepay;
         }
-        debt[debtor] -= Math.mulDiv(amount, 1e18, cumulativeRates);
+
+        uint256 debtAmount = Math.mulDiv(amount, 1e18, cumulativeRates);
+
+        debt[debtor] -= debtAmount;
+
+        totalDebt -= debtAmount;
 
         IERC20(i_lv.asset()).safeTransferFrom(repayer, address(i_lv), amount);
 
@@ -269,10 +282,13 @@ contract BorrowingPool {
     function _currentBorrowRate() internal returns (uint256 borrowRate) {
         _updateTotalSupply();
 
-        uint256 utilization = totalBorrows / totalSupply;
+        uint256 currentTotalDebt = _calculateTotalDebt();
+
+        uint256 utilization = currentTotalDebt / totalAssets;
 
         if (utilization > OPTIMAL_UTILIZATION) {
-            borrowRate = BASE_RATE + SLOPE1 + SLOPE2 * ((utilization - OPTIMAL_UTILIZATION) / (1 - OPTIMAL_UTILIZATION));
+            borrowRate =
+                BASE_RATE + SLOPE1 + SLOPE2 * ((utilization - OPTIMAL_UTILIZATION) / (1e18 - OPTIMAL_UTILIZATION));
         } else {
             borrowRate = BASE_RATE + SLOPE1 * (utilization / OPTIMAL_UTILIZATION);
         }
@@ -280,6 +296,10 @@ contract BorrowingPool {
 
     function _updateCumulativeRates() internal {
         uint256 dt = block.timestamp - lastUpdateTimestamp;
+
+        if (dt == 0) {
+            return;
+        }
 
         uint256 borrowRate = _currentBorrowRate();
 
@@ -296,7 +316,13 @@ contract BorrowingPool {
         return debt[user] * cumulativeRates / 1e18;
     }
 
-    function _updateTotalSupply() internal view {
-        totalSupply = i_lv.totalAssets();
+    function _calculateTotalDebt() internal returns (uint256) {
+        _updateCumulativeRates();
+
+        return totalDebt * cumulativeRates / 1e18;
+    }
+
+    function _updateTotalSupply() internal {
+        totalAssets = i_lv.totalAssetsInVault() + _calculateTotalDebt();
     }
 }
